@@ -145,9 +145,9 @@ class Handler(SimpleHTTPRequestHandler):
             self._json_error(413, "Text is too long. Please use 30,000 characters or fewer.")
             return
         try:
-            api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+            api_key = os.environ.get("GROQ_API_KEY", "").strip()
             if not api_key:
-                self._json_error(503, "Gemini is not configured on the server. Add GEMINI_API_KEY to this Render service's Environment settings, save, and redeploy.")
+                self._json_error(503, "Groq is not configured on the server. Add GROQ_API_KEY to this Render service's Environment settings, save, and redeploy.")
                 return
             style = str(data.get("style", "natural"))[:30].lower()
             style_guidance = {
@@ -164,39 +164,44 @@ class Handler(SimpleHTTPRequestHandler):
                 "editing, not an attempt to misrepresent authorship or influence AI-detection systems.\n\n"
                 f"Style: {style_guidance}\n\nText to edit:\n{source}"
             )
-            model = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+            model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
             payload = json.dumps({
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.35, "maxOutputTokens": 8192},
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are a careful writing editor. Follow the user's editing instructions and preserve factual accuracy."},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.35,
+                "max_tokens": 8192,
             }).encode("utf-8")
             request = Request(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                "https://api.groq.com/openai/v1/chat/completions",
                 data=payload, method="POST",
-                headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+                headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
             )
             with urlopen(request, timeout=90) as response:
                 response_data = json.loads(response.read().decode("utf-8"))
-            candidates = response_data.get("candidates", [])
+            choices = response_data.get("choices", [])
             result = ""
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                result = "".join(part.get("text", "") for part in parts if isinstance(part.get("text"), str)).strip()
+            if choices:
+                result = str(choices[0].get("message", {}).get("content") or "").strip()
             if not result:
-                self._json_error(502, "Gemini returned no editable text. Check the model response and try again.")
+                self._json_error(502, "Groq returned no editable text. Please try again.")
                 return
-            self._json_response(200, {"ok": True, "text": result, "mode": "gemini-generative-ai",
-                "model": model, "note": "Revised with Google Gemini. Review the result to confirm that meaning, facts, and references remain accurate."})
+            self._json_response(200, {"ok": True, "text": result, "mode": "groq-generative-ai",
+                "model": model, "note": "Revised with Groq AI. Review the result to confirm that meaning, facts, and references remain accurate."})
         except HTTPError as exc:
             try:
-                detail = json.loads(exc.read().decode("utf-8")).get("error", {}).get("message", "")
+                error_data = json.loads(exc.read().decode("utf-8"))
+                detail = error_data.get("error", {}).get("message", "")
             except Exception:
                 detail = ""
-            message = "Gemini rejected the request. Check that GEMINI_API_KEY is valid, has Gemini API access, and that the selected model is available."
+            message = "Groq rejected the request. Check that GROQ_API_KEY is valid and that the selected model is available on your plan."
             if detail:
                 message += " Provider detail: " + str(detail)[:300]
             self._json_error(502, message)
         except (URLError, TimeoutError):
-            self._json_error(504, "Gemini took too long to respond. Please try again.")
+            self._json_error(504, "Groq took too long to respond. Please try again.")
         except Exception:
             self._json_error(500, "Text editing is temporarily unavailable.")
 
