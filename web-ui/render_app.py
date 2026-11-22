@@ -145,11 +145,48 @@ class Handler(SimpleHTTPRequestHandler):
             self._json_error(413, "Text is too long. Please use 30,000 characters or fewer.")
             return
         try:
+            style = str(data.get("style", "natural"))[:30].lower()
+            api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+            if api_key:
+                style_guidance = {
+                    "natural": "Use clear, natural, readable prose.",
+                    "professional": "Use a professional, precise, appropriately formal tone.",
+                    "plain": "Use plain English, short clear sentences, and familiar words.",
+                    "conversational": "Use a warm, conversational tone without filler.",
+                }.get(style, "Use clear, natural, readable prose.")
+                prompt = (
+                    "Edit the user's text for clarity, grammar, coherence, and readability. Preserve meaning, "
+                    "facts, qualifications, examples, and the author's own voice. Do not invent evidence, "
+                    "citations, quotations, data, or references. Keep citations, reference entries, headings, "
+                    "lists, equations, and technical terms intact. Return only the revised text. This is ordinary "
+                    "editing, not an attempt to misrepresent authorship or influence AI-detection systems.\n\n"
+                    f"Style: {style_guidance}\n\nText to edit:\n{source}"
+                )
+                model = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+                payload = json.dumps({"model": model, "input": prompt, "store": False}).encode("utf-8")
+                request = Request(
+                    "https://generativelanguage.googleapis.com/v1beta/interactions",
+                    data=payload, method="POST",
+                    headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+                )
+                with urlopen(request, timeout=90) as response:
+                    response_data = json.loads(response.read().decode("utf-8"))
+                result = response_data.get("output_text", "").strip()
+                if not result:
+                    for step in response_data.get("steps", []):
+                        if step.get("type") == "model_output":
+                            result += "".join(part.get("text", "") for part in step.get("content", []) if part.get("type") == "text")
+                result = result.strip()
+                if not result:
+                    raise ValueError("Gemini returned an empty response.")
+                self._json_response(200, {"ok": True, "text": result, "mode": "gemini-generative-ai",
+                    "model": model, "note": "Revised with Google Gemini. Review the result to confirm that meaning, facts, and references remain accurate."})
+                return
+
             sys.path.insert(0, "/app/scripts")
             from humanize_pass import humanize_pass
             import re
             result = humanize_pass(source)
-            style = str(data.get("style", "natural"))[:30]
             if style == "plain":
                 swaps = {"approximately": "about", "therefore": "so", "commence": "start",
                          "demonstrate": "show", "numerous": "many", "individuals": "people"}
@@ -159,7 +196,11 @@ class Handler(SimpleHTTPRequestHandler):
                 result = re.sub(r"\bdo not\b", "don't", result, flags=re.I)
                 result = re.sub(r"\bcannot\b", "can't", result, flags=re.I)
             self._json_response(200, {"ok": True, "text": result, "mode": "free-rule-based-editor",
-                "note": "Free local editing pass. It improves selected wording and punctuation but does not use a generative AI model or guarantee human authorship or detector outcomes."})
+                "note": "Free local editing pass. Add GEMINI_API_KEY in Render Environment to enable generative AI editing."})
+        except HTTPError:
+            self._json_error(502, "Gemini could not process the request. Check the API key, model access, and usage limits.")
+        except (URLError, TimeoutError):
+            self._json_error(504, "Gemini took too long to respond. Please try again.")
         except Exception:
             self._json_error(500, "Text editing is temporarily unavailable.")
 
