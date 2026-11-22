@@ -16,7 +16,8 @@ RUN apt-get update \
 COPY service/scripts /app/scripts
 COPY config /app/config
 COPY web-ui /app/web-ui
-RUN chmod -R a+rX /app
+RUN python3 -m pip install --no-cache-dir opencv-python-headless \
+    && chmod -R a+rX /app
 
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin remover
 USER remover

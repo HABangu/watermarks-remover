@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import atexit
+import base64
+import json
 import os
 import subprocess
 import sys
@@ -17,6 +19,7 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parent
 API = "http://127.0.0.1:8765"
 MAX_BODY = 18 * 1024 * 1024
+MAX_IMAGE_PIXELS = 12_000_000
 RATE_WINDOW = 15 * 60
 RATE_LIMIT = 12
 rates: dict[str, deque[float]] = defaultdict(deque)
@@ -75,6 +78,12 @@ class Handler(SimpleHTTPRequestHandler):
             super().do_GET()
 
     def do_POST(self):
+        if self.path == "/api/humanize":
+            self._humanize()
+            return
+        if self.path == "/api/inpaint":
+            self._inpaint()
+            return
         if self.path not in ("/api/inspect", "/api/clean"):
             self.send_error(404)
             return
@@ -96,6 +105,104 @@ class Handler(SimpleHTTPRequestHandler):
             self._proxy("POST", self.path[4:], self.rfile.read(length))
         finally:
             work_slots.release()
+
+    def _read_api_json(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > MAX_BODY:
+                self._json_error(413, "Request is empty or exceeds the 18 MB limit.")
+                return None
+            value = json.loads(self.rfile.read(length).decode("utf-8"))
+            if not isinstance(value, dict):
+                raise ValueError("Expected a JSON object")
+            return value
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            self._json_error(400, "Invalid JSON request.")
+            return None
+
+    def _json_response(self, status: int, payload: dict):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _humanize(self):
+        if not self._allow_request():
+            self._json_error(429, "Request limit reached. Please wait before trying again.")
+            return
+        data = self._read_api_json()
+        if data is None:
+            return
+        source = data.get("text")
+        if not isinstance(source, str) or not source.strip():
+            self._json_error(400, "Enter some text first.")
+            return
+        if len(source) > 30000:
+            self._json_error(413, "Text is too long. Please use 30,000 characters or fewer.")
+            return
+        try:
+            sys.path.insert(0, "/app/scripts")
+            from humanize_pass import humanize_pass
+            import re
+            result = humanize_pass(source)
+            style = str(data.get("style", "natural"))[:30]
+            if style == "plain":
+                swaps = {"approximately": "about", "therefore": "so", "commence": "start",
+                         "demonstrate": "show", "numerous": "many", "individuals": "people"}
+                for before, after in swaps.items():
+                    result = re.sub(r"\b" + before + r"\b", after, result, flags=re.I)
+            elif style == "conversational":
+                result = re.sub(r"\bdo not\b", "don't", result, flags=re.I)
+                result = re.sub(r"\bcannot\b", "can't", result, flags=re.I)
+            self._json_response(200, {"ok": True, "text": result, "mode": "free-rule-based-editor",
+                "note": "Free local editing pass. It improves selected wording and punctuation but does not use a generative AI model or guarantee human authorship or detector outcomes."})
+        except Exception:
+            self._json_error(500, "Text editing is temporarily unavailable.")
+
+    def _inpaint(self):
+        if not self._allow_request():
+            self._json_error(429, "Request limit reached. Please wait before trying again.")
+            return
+        data = self._read_api_json()
+        if data is None:
+            return
+        try:
+            import cv2
+            import numpy as np
+            raw = base64.b64decode(data.get("file", ""), validate=True)
+            mask_raw = base64.b64decode(data.get("mask", ""), validate=True)
+            if len(raw) > 10 * 1024 * 1024:
+                raise ValueError("Image exceeds the 10 MB limit.")
+            image = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+            mask = cv2.imdecode(np.frombuffer(mask_raw, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+            if image is None or mask is None:
+                raise ValueError("Could not read the image or brush mask.")
+            h, w = image.shape[:2]
+            if h * w > MAX_IMAGE_PIXELS:
+                raise ValueError("Image dimensions exceed 12 megapixels.")
+            if mask.shape[:2] != (h, w):
+                raise ValueError("Brush mask dimensions do not match the image.")
+            if not np.any(mask):
+                raise ValueError("Paint over the area you want to repair first.")
+            radius = max(2, min(7, int(data.get("radius", 4))))
+            repaired = cv2.inpaint(image, mask, radius, cv2.INPAINT_TELEA)
+            ok, encoded = cv2.imencode(".png", repaired, [cv2.IMWRITE_PNG_COMPRESSION, 4])
+            if not ok:
+                raise ValueError("Could not encode repaired image.")
+            self._json_response(200, {"ok": True, "name": "repaired-image.png",
+                "image": base64.b64encode(encoded.tobytes()).decode("ascii"),
+                "method": "OpenCV Telea inpainting",
+                "note": "Best for small marks and simple backgrounds. Complex areas may need manual retouching."})
+        except ValueError as exc:
+            self._json_error(400, str(exc))
+        except ImportError:
+            self._json_error(503, "Image repair backend is not installed.")
+        except Exception:
+            self._json_error(500, "Image repair failed. Try a smaller image or a simpler selection.")
 
     def _json_error(self, status: int, message: str):
         body = ('{"error":' + __import__("json").dumps(message) + '}').encode()
