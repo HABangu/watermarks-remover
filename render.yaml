@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: watermarks-remover
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile.render
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeploy: false
