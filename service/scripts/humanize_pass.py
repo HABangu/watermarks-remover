@@ -22,12 +22,33 @@ _PHRASE_SWAPS: tuple[tuple[str, str], ...] = (
     (r"\bin the event that\b", "if"),
     (r"\bhas the ability to\b", "can"),
     (r"\bhave the ability to\b", "can"),
-    (r"\bit is important to note that\b", "note that"),
-    (r"\bit is worth noting that\b", "note that"),
+    (r"\bit is important to note that\b", ""),
+    (r"\bit is worth noting that\b", ""),
     (r"\bdelve into\b", "explore"),
     (r"\bdelves into\b", "explores"),
     (r"\bdelved into\b", "explored"),
     (r"\bdelving into\b", "exploring"),
+    # Trim stock filler and empty transitions; retain the substantive claim.
+    (r"^\s*in today's fast-paced world,?\s*", ""),
+    (r"^\s*in today’s fast-paced world,?\s*", ""),
+    (r"\bit is essential to remember that\s*", ""),
+    (r"\bit's essential to remember that\s*", ""),
+    (r"\bit is worth noting that\s*", ""),
+    (r"\bit's worth noting that\s*", ""),
+    (r"\bplays a crucial role in\b", "is important to"),
+    (r"\bplays an important role in\b", "is important to"),
+    (r"\ba wide range of\b", "many"),
+    (r"\bin conclusion,?\s*", ""),
+    (r"\bmoreover,?\s*", ""),
+    (r"\bfurthermore,?\s*", ""),
+    (r"\badditionally,?\s*", ""),
+    (r"\bin the realm of\b", "in"),
+    (r"\bit is important to note that\b", ""),
+    (r"\bit's important to note that\b", ""),
+    (r"\bas an AI language model,?\s*", ""),
+    (r"\bcertainly!?\s*here'?s\s*", ""),
+    (r"\bi hope this helps!?\s*", ""),
+    (r"\blet me know if you'd like me to expand\.?\s*", ""),
 )
 
 _WORD_SWAPS: dict[str, str] = {
@@ -35,9 +56,16 @@ _WORD_SWAPS: dict[str, str] = {
     "utilizes": "uses",
     "utilized": "used",
     "utilizing": "using",
+    "leverage": "use",
+    "leverages": "uses",
+    "leveraged": "used",
+    "leveraging": "using",
 }
 
-_WORD_RE = re.compile(r"\b(?:utilize|utilizes|utilized|utilizing)\b", re.IGNORECASE)
+_WORD_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(word) for word in _WORD_SWAPS) + r")\b",
+    re.IGNORECASE,
+)
 
 
 def _capitalize_like(matched: str, replacement: str) -> str:
@@ -112,4 +140,7 @@ def humanize_pass(text: str) -> str:
     text = _replace_dashes(text)
     text = _collapse_phrases(text)
     text = _swap_words(text)
+    # Clean spacing left by removed filler and restore paragraph-start capitals.
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"(?m)(^|[.!?][ \t]+)([a-z])", lambda m: m.group(1) + m.group(2).upper(), text)
     return text
